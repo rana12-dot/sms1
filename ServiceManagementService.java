@@ -10,6 +10,8 @@ import com.stubserver.backend.database.repository.VsDetailsRepository;
 import com.stubserver.backend.util.FilePathGuard;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -91,6 +93,25 @@ public class ServiceManagementService {
 
     // ===== Dataset file operations =====
 
+    @EventListener(ApplicationReadyEvent.class)
+    public void ensureDatasetPermissions() {
+        String user = System.getProperty("user.name");
+        for (Path root : datasetRoots()) {
+            try {
+                int exit = new ProcessBuilder("icacls", root.toAbsolutePath().toString(),
+                        "/grant", user + ":(OI)(CI)F", "/T")
+                        .redirectErrorStream(true).start().waitFor();
+                if (exit == 0) {
+                    log.info("Dataset permissions granted for '{}' on: {}", user, root);
+                } else {
+                    log.warn("icacls returned non-zero ({}) for: {} — delete may fail", exit, root);
+                }
+            } catch (Exception e) {
+                log.warn("Could not set dataset permissions on {}: {}", root, e.getMessage());
+            }
+        }
+    }
+
     private List<Path> datasetRoots() {
         String raw = appProperties.getDatasetPaths();
         if (raw == null || raw.isEmpty()) return List.of();
@@ -152,29 +173,12 @@ public class ServiceManagementService {
 
     public Map<String, String> deleteDataset(String serviceName, String fileName) {
         Path file = findDatasetFile(serviceName, fileName);
-        String filePath = file.toAbsolutePath().toString();
-
         try {
-            // Step 1: take ownership of the file
-            new ProcessBuilder("takeown", "/f", filePath)
-                    .redirectErrorStream(true).start().waitFor();
-
-            // Step 2: grant full control to current user
-            new ProcessBuilder("icacls", filePath, "/grant",
-                    System.getProperty("user.name") + ":F")
-                    .redirectErrorStream(true).start().waitFor();
-
-            // Step 3: delete
             Files.delete(file);
-
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Delete interrupted.");
         } catch (IOException e) {
-            log.error("Delete failed for {}: {} - {}", filePath, e.getClass().getSimpleName(), e.getMessage());
+            log.error("Delete failed for {}: {} - {}", file, e.getClass().getSimpleName(), e.getMessage());
             throw new RuntimeException("Failed to delete file: " + e.getClass().getSimpleName());
         }
-
         return Map.of("status", "success", "message", "File deleted successfully.",
                 "serviceName", serviceName, "fileName", fileName);
     }
